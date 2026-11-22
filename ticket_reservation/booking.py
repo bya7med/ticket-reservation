@@ -108,6 +108,57 @@ def hold_seat(
         return _to_hold(row)
 
 
+def confirm_hold(
+    conn: psycopg.Connection,
+    *,
+    idempotency_key: str,
+    now: datetime | None = None,
+) -> Hold:
+    """Turn an active hold into a booking.
+
+    A second call with the same key returns that booking and does not
+    insert another row.
+    """
+    if not idempotency_key.strip():
+        raise ValueError("idempotency_key is required")
+    current = _clock(now)
+
+    with conn.transaction():
+        preview = _hold_by_key(conn, idempotency_key, lock=False)
+        if preview is None:
+            raise HoldNotFound(idempotency_key)
+        _lock_seat(conn, preview["seat_id"])
+        row = _hold_by_key(conn, idempotency_key, lock=True)
+        if row is None:
+            raise HoldNotFound(idempotency_key)
+        if row["status"] == "confirmed":
+            return _to_hold(row)
+        if row["status"] != "active":
+            raise HoldNotActive(row["status"])
+        if row["expires_at"] <= current:
+            conn.execute(
+                """
+                UPDATE holds
+                   SET status = 'expired',
+                       updated_at = %s
+                 WHERE id = %s
+                """,
+                (current, row["id"]),
+            )
+            raise HoldNotActive("expired")
+        updated = conn.execute(
+            f"""
+            UPDATE holds
+               SET status = 'confirmed',
+                   updated_at = %s
+             WHERE id = %s
+            RETURNING {_HOLD_COLUMNS}
+            """,
+            (current, row["id"]),
+        ).fetchone()
+        return _to_hold(updated)
+
+
 def _required(buyer_key: str, idempotency_key: str) -> None:
     if not buyer_key.strip() or not idempotency_key.strip():
         raise ValueError("buyer_key and idempotency_key are required")
