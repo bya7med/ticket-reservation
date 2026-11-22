@@ -159,6 +159,58 @@ def confirm_hold(
         return _to_hold(updated)
 
 
+def cancel_hold(
+    conn: psycopg.Connection,
+    *,
+    idempotency_key: str,
+    now: datetime | None = None,
+) -> Hold:
+    """Cancel an active hold and leave the seat free for someone else.
+
+    Cancelling twice returns the same row. A confirmed booking is left
+    as it is.
+    """
+    if not idempotency_key.strip():
+        raise ValueError("idempotency_key is required")
+    current = _clock(now)
+
+    with conn.transaction():
+        preview = _hold_by_key(conn, idempotency_key, lock=False)
+        if preview is None:
+            raise HoldNotFound(idempotency_key)
+        _lock_seat(conn, preview["seat_id"])
+        row = _hold_by_key(conn, idempotency_key, lock=True)
+        if row is None:
+            raise HoldNotFound(idempotency_key)
+        if row["status"] == "cancelled":
+            return _to_hold(row)
+        if row["status"] == "confirmed":
+            raise HoldNotActive("confirmed")
+        if row["status"] == "expired" or row["expires_at"] <= current:
+            if row["status"] == "active":
+                conn.execute(
+                    """
+                    UPDATE holds
+                       SET status = 'expired',
+                           updated_at = %s
+                     WHERE id = %s
+                    """,
+                    (current, row["id"]),
+                )
+            raise HoldNotActive("expired")
+        updated = conn.execute(
+            f"""
+            UPDATE holds
+               SET status = 'cancelled',
+                   updated_at = %s
+             WHERE id = %s
+            RETURNING {_HOLD_COLUMNS}
+            """,
+            (current, row["id"]),
+        ).fetchone()
+        return _to_hold(updated)
+
+
 def _required(buyer_key: str, idempotency_key: str) -> None:
     if not buyer_key.strip() or not idempotency_key.strip():
         raise ValueError("buyer_key and idempotency_key are required")
