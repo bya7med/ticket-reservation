@@ -15,3 +15,9 @@ psql "$DATABASE_URL" -f sql/001_events_seats_holds.sql
 ```
 
 `events` is the show, `seats` is one label inside that show, and `holds` is a buyer's claim. A seat can have one active hold or one confirmed booking. A cancelled or expired hold leaves the seat free.
+
+## Holding a seat
+
+`hold_seat` runs in one transaction. It locks the seat, marks any lapsed hold on that seat as expired, and inserts a new active row only if the seat is free. The unique index on live holds is there in case a second insert still races through.
+
+Pass `hold_for` as how long the hold stays valid. A later call with the same `idempotency_key` returns the hold that was already stored.
