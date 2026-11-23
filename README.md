@@ -15,3 +15,29 @@ psql "$DATABASE_URL" -f sql/001_events_seats_holds.sql
 ```
 
 `events` is the show, `seats` is one label inside that show, and `holds` is a buyer's claim. A seat can have one active hold or one confirmed booking. A cancelled or expired hold leaves the seat free.
+
+## Holding a seat
+
+`hold_seat` runs in one transaction. It locks the seat, marks any lapsed hold on that seat as expired, and inserts a new active row only if the seat is free. The unique index on live holds is there in case a second insert still races through.
+
+Pass `hold_for` as how long the hold stays valid. A later call with the same `idempotency_key` returns the hold that was already stored.
+
+## Confirming a booking
+
+`confirm_hold` locks the seat, then the hold. An active hold that has not expired becomes `confirmed`. Calling it again with the same idempotency key returns that booking. It does not write a second one. A cancelled or expired hold cannot be confirmed.
+
+`cancel_hold` marks an active hold as cancelled. The seat can then be held by another buyer. A second cancel returns the same row. A confirmed booking is not cancelled by this call.
+
+## Tests
+
+The tests need a Postgres database you can wipe. `ticket_reservation_test` is a good name.
+
+```bash
+python -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+createdb ticket_reservation_test
+DATABASE_URL=postgresql:///ticket_reservation_test pytest
+```
+
+`test_race.py` starts two buyers on one seat at the same moment. One hold is stored. `test_cancelled_hold.py` checks that a cancelled hold cannot be confirmed and that another buyer can take the seat. `test_expiry_and_repeat.py` checks that a lapsed hold gives the seat up, and that confirming the same request twice does not create a second booking.
